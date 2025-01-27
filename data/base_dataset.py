@@ -7,6 +7,7 @@ import numpy as np
 import torch.utils.data as data
 from PIL import Image
 import torchvision.transforms as transforms
+import torchvision.transforms.functional as F
 from abc import ABC, abstractmethod
 
 
@@ -69,25 +70,39 @@ def get_params(opt, size):
     elif opt.preprocess == 'scale_width_and_crop':
         new_w = opt.load_size
         new_h = opt.load_size * h // w
+    if 'random_resize' in opt.preprocess:
+        if np.random.random() < 0.95:
+            new_h = random.randint(768, 1024)
+            new_w = random.randint(768, 1024)
+        else:
+            new_h = 768
+            new_w = 768
 
     x = random.randint(0, np.maximum(0, new_w - opt.crop_size))
     y = random.randint(0, np.maximum(0, new_h - opt.crop_size))
 
     flip = random.random() > 0.5
+    angle = opt.rotate_angle
+    rotate = random.uniform(-angle, angle)
 
-    return {'crop_pos': (x, y), 'flip': flip}
+    return {'crop_pos': (x, y), 'flip': flip, 'rotate': rotate, 'new_size': (new_w, new_h)}
 
 
-def get_transform(opt, params=None, grayscale=False, method=transforms.InterpolationMode.BICUBIC, convert=True):
+def get_transform(opt, params=None, grayscale=False, method=transforms.InterpolationMode.BICUBIC, convert=True, is_mask=False):
     transform_list = []
     if grayscale:
         transform_list.append(transforms.Grayscale(1))
-    if 'resize' in opt.preprocess:
+    # train: random resize, then pad, then random crop to crop_size
+    # infer: resize
+    if 'random_resize' in opt.preprocess:
+        transform_list.append(transforms.Resize(params['new_size'], method))
+    if 'pad' in opt.preprocess:
+        transform_list.append(transforms.Lambda(lambda img: __pad(img, opt.pad_size)))
+    if 'resize' in opt.preprocess and 'random_resize' not in opt.preprocess:
         osize = [opt.load_size, opt.load_size]
         transform_list.append(transforms.Resize(osize, method))
     elif 'scale_width' in opt.preprocess:
         transform_list.append(transforms.Lambda(lambda img: __scale_width(img, opt.load_size, opt.crop_size, method)))
-
     if 'crop' in opt.preprocess:
         if params is None:
             transform_list.append(transforms.RandomCrop(opt.crop_size))
@@ -102,6 +117,16 @@ def get_transform(opt, params=None, grayscale=False, method=transforms.Interpola
             transform_list.append(transforms.RandomHorizontalFlip())
         elif params['flip']:
             transform_list.append(transforms.Lambda(lambda img: __flip(img, params['flip'])))
+
+    if not opt.no_rotate:
+        if params is not None:
+            if 'rotate' in params:
+                angle = params['rotate']
+                transform_list.append(transforms.Lambda(lambda img: __rotate(img, angle, method)))
+
+    if "hard" in opt.preprocess and is_mask is False:
+        transform_list.append(transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2))
+        transform_list.append(transforms.RandomApply([transforms.GaussianBlur(kernel_size=5)], p=0.5))
 
     if convert:
         transform_list += [transforms.ToTensor()]
@@ -149,6 +174,20 @@ def __crop(img, pos, size):
     if (ow > tw or oh > th):
         return img.crop((x1, y1, x1 + tw, y1 + th))
     return img
+
+
+def __pad(img, pad_size):
+    ow, oh = img.size
+    if ow >= pad_size and oh >= pad_size:
+        return img
+    pad_w = max(0, pad_size - ow)
+    pad_h = max(0, pad_size - oh)
+    padding = (pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2)
+    return F.pad(img, padding, padding_mode='edge')
+
+
+def __rotate(img, angle, interpolation):
+    return F.rotate(img, angle, interpolation=interpolation)
 
 
 def __flip(img, flip):

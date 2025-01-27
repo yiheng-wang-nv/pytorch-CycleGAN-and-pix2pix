@@ -2,6 +2,27 @@ import torch
 from .base_model import BaseModel
 from . import networks
 
+import torch.nn as nn
+import torchvision.models as models
+
+class PerceptualLoss(nn.Module):
+    def __init__(self, layers=[4, 9, 16, 23, 30]):
+        super(PerceptualLoss, self).__init__()
+        resnet = models.resnet50(pretrained=True)
+        self.layers = layers
+        self.resnet_layers = nn.Sequential(*list(resnet.children())[:8]).eval()
+        for param in self.resnet_layers.parameters():
+            param.requires_grad = False
+
+    def forward(self, x, y):
+        x_resnet, y_resnet = x, y
+        loss = 0
+        for i, layer in enumerate(self.resnet_layers):
+            x_resnet = layer(x_resnet)
+            y_resnet = layer(y_resnet)
+            if i in self.layers:
+                loss += nn.functional.l1_loss(x_resnet, y_resnet)
+        return loss
 
 class Pix2PixModel(BaseModel):
     """ This class implements the pix2pix model, for learning a mapping from input images to output images given paired data.
@@ -32,7 +53,8 @@ class Pix2PixModel(BaseModel):
         parser.set_defaults(norm='batch', netG='unet_256', dataset_mode='aligned')
         if is_train:
             parser.set_defaults(pool_size=0, gan_mode='vanilla')
-            parser.add_argument('--lambda_L1', type=float, default=100.0, help='weight for L1 loss')
+            parser.add_argument('--lambda_L1', type=float, default=200.0, help='weight for L1 loss')
+            parser.add_argument('--lambda_perceptual', type=float, default=10.0, help='weight for perceptual loss')
 
         return parser
 
@@ -64,6 +86,7 @@ class Pix2PixModel(BaseModel):
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)
             self.criterionL1 = torch.nn.L1Loss()
+            # self.criterionPerceptual = PerceptualLoss().to(self.device)
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -102,13 +125,15 @@ class Pix2PixModel(BaseModel):
         self.loss_D.backward()
 
     def backward_G(self):
-        """Calculate GAN and L1 loss for the generator"""
+        """Calculate GAN, L1, and Perceptual loss for the generator"""
         # First, G(A) should fake the discriminator
         fake_AB = torch.cat((self.real_A, self.fake_B), 1)
         pred_fake = self.netD(fake_AB)
         self.loss_G_GAN = self.criterionGAN(pred_fake, True)
         # Second, G(A) = B
         self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_L1
+        # # Third, Perceptual loss
+        # self.loss_G_perceptual = self.criterionPerceptual(self.fake_B, self.real_B) * self.opt.lambda_perceptual
         # combine loss and calculate gradients
         self.loss_G = self.loss_G_GAN + self.loss_G_L1
         self.loss_G.backward()
