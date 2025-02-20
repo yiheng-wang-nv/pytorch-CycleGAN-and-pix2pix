@@ -81,6 +81,13 @@ def get_params(opt, size):
     x = random.randint(0, np.maximum(0, new_w - opt.crop_size))
     y = random.randint(0, np.maximum(0, new_h - opt.crop_size))
 
+    if opt.preprocess == 'random_crop_and_resize':
+        new_h = random.randint(256, h)
+        new_w = random.randint(256, w)
+
+        x = random.randint(0, np.maximum(0, w - new_w))
+        y = random.randint(0, np.maximum(0, h - new_h))
+
     flip = random.random() > 0.5
     angle = opt.rotate_angle
     rotate = random.uniform(-angle, angle)
@@ -92,8 +99,16 @@ def get_transform(opt, params=None, grayscale=False, method=transforms.Interpola
     transform_list = []
     if grayscale:
         transform_list.append(transforms.Grayscale(1))
-    # train: random resize, then pad, then random crop to crop_size
+    # train: random crop, then resize
     # infer: resize
+    if 'crop' in opt.preprocess:
+        if params is None:
+            transform_list.append(transforms.RandomCrop(opt.crop_size))
+        else:
+            if opt.preprocess == 'random_crop_and_resize':
+                transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_pos'], params['new_size'])))
+            else:
+                transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_pos'], opt.crop_size)))
     if 'random_resize' in opt.preprocess:
         transform_list.append(transforms.Resize(params['new_size'], method))
     if 'pad' in opt.preprocess:
@@ -101,13 +116,6 @@ def get_transform(opt, params=None, grayscale=False, method=transforms.Interpola
     if 'resize' in opt.preprocess and 'random_resize' not in opt.preprocess:
         osize = [opt.load_size, opt.load_size]
         transform_list.append(transforms.Resize(osize, method))
-    elif 'scale_width' in opt.preprocess:
-        transform_list.append(transforms.Lambda(lambda img: __scale_width(img, opt.load_size, opt.crop_size, method)))
-    if 'crop' in opt.preprocess:
-        if params is None:
-            transform_list.append(transforms.RandomCrop(opt.crop_size))
-        else:
-            transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_pos'], opt.crop_size)))
 
     if opt.preprocess == 'none':
         transform_list.append(transforms.Lambda(lambda img: __make_power_2(img, base=4, method=method)))
@@ -129,11 +137,12 @@ def get_transform(opt, params=None, grayscale=False, method=transforms.Interpola
         transform_list.append(transforms.RandomApply([transforms.GaussianBlur(kernel_size=5)], p=0.5))
 
     if convert:
-        transform_list += [transforms.ToTensor()]
-        if grayscale:
-            transform_list += [transforms.Normalize((0.5,), (0.5,))]
-        else:
-            transform_list += [transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+        if is_mask is False:
+            transform_list += [transforms.ToTensor()]
+            if grayscale:
+                transform_list += [transforms.Normalize((0.5,), (0.5,))]
+            else:
+                transform_list += [transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     return transforms.Compose(transform_list)
 
 
@@ -170,7 +179,10 @@ def __scale_width(img, target_size, crop_size, method=transforms.InterpolationMo
 def __crop(img, pos, size):
     ow, oh = img.size
     x1, y1 = pos
-    tw = th = size
+    if isinstance(size, int):
+        tw = th = size
+    else:
+        tw, th = size
     if (ow > tw or oh > th):
         return img.crop((x1, y1, x1 + tw, y1 + th))
     return img

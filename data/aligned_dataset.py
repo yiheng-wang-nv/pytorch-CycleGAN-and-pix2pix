@@ -3,6 +3,8 @@ from data.base_dataset import BaseDataset, get_params, get_transform
 from data.image_folder import make_dataset
 import torchvision.transforms as transforms
 from PIL import Image
+import numpy as np
+import torch
 
 
 class AlignedDataset(BaseDataset):
@@ -25,6 +27,10 @@ class AlignedDataset(BaseDataset):
         self.input_nc = self.opt.output_nc if self.opt.direction == 'BtoA' else self.opt.input_nc
         self.output_nc = self.opt.input_nc if self.opt.direction == 'BtoA' else self.opt.output_nc
 
+        color_maps = {(0, 0, 0): 0, (255, 0, 0): 1, (0, 255, 0): 2, (0, 0, 255): 3}
+        self.color_keys = np.array(list(color_maps.keys()))
+        self.color_values = np.array(list(color_maps.values()))
+
     def __getitem__(self, index):
         """Return a data point and its metadata information.
 
@@ -46,6 +52,16 @@ class AlignedDataset(BaseDataset):
         A = AB.crop((0, 0, w2, h))
         B = AB.crop((w2, 0, w, h))
 
+        # remap B to 1 channel
+        mask = np.array(B)
+        reshaped_mask = mask.reshape(-1, 3)
+        indices = np.where((reshaped_mask[:, None] == self.color_keys).all(-1))[1]
+        single_channel_mask = self.color_values[indices].reshape(mask.shape[:2])
+        single_channel_mask = single_channel_mask.astype(np.uint8)
+        B = Image.fromarray(single_channel_mask)
+        # remap A to 1 channel
+        A = A.convert('L')
+
         # apply the same transform to both A and B
         transform_params = get_params(self.opt, A.size)
         A_transform = get_transform(self.opt, transform_params, grayscale=(self.input_nc == 1), method=transforms.InterpolationMode.BILINEAR, is_mask=False)
@@ -53,6 +69,7 @@ class AlignedDataset(BaseDataset):
 
         A = A_transform(A)
         B = B_transform(B)
+        B = torch.tensor(np.array(B)).unsqueeze(0).float()
 
         return {'A': A, 'B': B, 'A_paths': AB_path, 'B_paths': AB_path}
 
