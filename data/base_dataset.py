@@ -9,6 +9,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as F
 from abc import ABC, abstractmethod
+import torch
 
 
 class BaseDataset(data.Dataset, ABC):
@@ -95,24 +96,32 @@ def get_params(opt, size):
     return {'crop_pos': (x, y), 'flip': flip, 'rotate': rotate, 'new_size': (new_w, new_h)}
 
 
-def get_transform(opt, params=None, grayscale=False, method=transforms.InterpolationMode.BICUBIC, convert=True, is_mask=False):
+def get_transform(opt, params=None, grayscale=False, method=transforms.InterpolationMode.BICUBIC, convert=True, is_mask=False, no_color_change=False):
     transform_list = []
-    if grayscale:
-        transform_list.append(transforms.Grayscale(1))
-    # train: random crop, then resize
+    # if grayscale:
+    #     transform_list.append(transforms.Grayscale(1))
+
+    if "hard" in opt.preprocess and is_mask is False and no_color_change is False:
+        transform_list.append(transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0, hue=0))
+        transform_list.append(transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.9))
+
+    # train: random pad, thencrop, then resize
     # infer: resize
+    if 'pad' in opt.preprocess:
+        if 'pad_to_square' in opt.preprocess:
+            transform_list.append(transforms.Lambda(lambda img: __pad_to_square(img)))
+        else:
+            transform_list.append(transforms.Lambda(lambda img: __pad(img, opt.pad_size)))
     if 'crop' in opt.preprocess:
         if params is None:
             transform_list.append(transforms.RandomCrop(opt.crop_size))
         else:
-            if opt.preprocess == 'random_crop_and_resize':
+            if opt.preprocess == 'random_pad_crop_and_resize':
                 transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_pos'], params['new_size'])))
             else:
                 transform_list.append(transforms.Lambda(lambda img: __crop(img, params['crop_pos'], opt.crop_size)))
     if 'random_resize' in opt.preprocess:
         transform_list.append(transforms.Resize(params['new_size'], method))
-    if 'pad' in opt.preprocess:
-        transform_list.append(transforms.Lambda(lambda img: __pad(img, opt.pad_size)))
     if 'resize' in opt.preprocess and 'random_resize' not in opt.preprocess:
         osize = [opt.load_size, opt.load_size]
         transform_list.append(transforms.Resize(osize, method))
@@ -132,17 +141,17 @@ def get_transform(opt, params=None, grayscale=False, method=transforms.Interpola
                 angle = params['rotate']
                 transform_list.append(transforms.Lambda(lambda img: __rotate(img, angle, method)))
 
-    if "hard" in opt.preprocess and is_mask is False:
-        transform_list.append(transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2))
-        transform_list.append(transforms.RandomApply([transforms.GaussianBlur(kernel_size=5)], p=0.5))
-
     if convert:
         if is_mask is False:
             transform_list += [transforms.ToTensor()]
+            # add torch based random transform
+            if "hard" in opt.preprocess and no_color_change is False:
+                transform_list.append(transforms.Lambda(lambda img: torch.pow(img, random.uniform(0.95, 0.95))))
             if grayscale:
                 transform_list += [transforms.Normalize((0.5,), (0.5,))]
             else:
                 transform_list += [transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+
     return transforms.Compose(transform_list)
 
 
@@ -195,8 +204,19 @@ def __pad(img, pad_size):
     pad_w = max(0, pad_size - ow)
     pad_h = max(0, pad_size - oh)
     padding = (pad_w // 2, pad_h // 2, pad_w - pad_w // 2, pad_h - pad_h // 2)
-    return F.pad(img, padding, padding_mode='edge')
+    return F.pad(img, padding, padding_mode='constant', fill=0)
 
+def __pad_to_square(img):
+    ow, oh = img.size
+    # do center pad to square
+    if ow > oh:
+        pad_h = (ow - oh) // 2
+        img = F.pad(img, (0, pad_h, 0, pad_h), padding_mode='constant', fill=0)
+    else:
+        pad_w = (oh - ow) // 2
+        img = F.pad(img, (pad_w, 0, pad_w, 0), padding_mode='constant', fill=0)
+
+    return img
 
 def __rotate(img, angle, interpolation):
     return F.rotate(img, angle, interpolation=interpolation)
